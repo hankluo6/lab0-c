@@ -16,6 +16,8 @@
 #include <unistd.h>
 
 #include "report.h"
+#include "type.h"
+#include "web.h"
 
 /* Some global values */
 int simulation = 0;
@@ -31,22 +33,6 @@ static bool block_timing = false;
 static double first_time;
 static double last_time;
 
-/*
- * Implement buffered I/O using variant of RIO package from CS:APP
- * Must create stack of buffers to handle I/O with nested source commands.
- */
-
-#define RIO_BUFSIZE 8192
-typedef struct RIO_ELE rio_t, *rio_ptr;
-
-struct RIO_ELE {
-    int fd;                /* File descriptor */
-    int cnt;               /* Unread bytes in internal buffer */
-    char *bufptr;          /* Next unread byte in internal buffer */
-    char buf[RIO_BUFSIZE]; /* Internal buffer */
-    rio_ptr prev;          /* Next element in stack */
-};
-
 static rio_ptr buf_stack;
 static char linebuf[RIO_BUFSIZE];
 
@@ -57,10 +43,13 @@ static int fd_max = 0;
 static int err_limit = 5;
 static int err_cnt = 0;
 static bool echo = 0;
+static bool noise = true;
 
 static bool quit_flag = false;
 static char *prompt = "cmd> ";
 static bool has_infile = false;
+
+static int listenfd = -1;
 
 /* Optional function to call as part of exit process */
 /* Maximum number of quit functions */
@@ -76,6 +65,7 @@ static bool do_source_cmd(int argc, char *argv[]);
 static bool do_log_cmd(int argc, char *argv[]);
 static bool do_time_cmd(int argc, char *argv[]);
 static bool do_comment_cmd(int argc, char *argv[]);
+static bool do_web_cmd(int argc, char *argv[]);
 
 static void init_in();
 
@@ -100,6 +90,7 @@ void init_cmd()
             " file           | Read commands from source file");
     add_cmd("log", do_log_cmd, " file           | Copy output to file");
     add_cmd("time", do_time_cmd, " cmd arg ...    | Time command execution");
+    add_cmd("web", do_web_cmd, "                | Response to web client");
     add_cmd("#", do_comment_cmd, " ...            | Display comment");
     add_param("simulation", &simulation, "Start/Stop simulation mode", NULL);
     add_param("verbose", &verblevel, "Verbosity level", NULL);
@@ -324,6 +315,14 @@ static bool do_comment_cmd(int argc, char *argv[])
     return true;
 }
 
+static bool do_web_cmd(int argc, char *argv[])
+{
+    /* If input web twice, it will emit error */
+    listenfd = socket_init();
+    noise = false;
+    return true;
+}
+
 /* Extract integer from text and store at loc */
 bool get_int(char *vname, int *loc)
 {
@@ -498,10 +497,6 @@ static char *readline()
                     /*  Terminate line & return it */
                     *lptr++ = '\n';
                     *lptr++ = '\0';
-                    if (echo) {
-                        report_noreturn(1, prompt);
-                        report_noreturn(1, linebuf);
-                    }
                     return linebuf;
                 }
                 return NULL;
@@ -521,11 +516,6 @@ static char *readline()
         *lptr++ = '\n';
     }
     *lptr++ = '\0';
-
-    if (echo) {
-        report_noreturn(1, prompt);
-        report_noreturn(1, linebuf);
-    }
 
     return linebuf;
 }
@@ -564,7 +554,13 @@ int cmd_select(int nfds,
 
         /* Add input fd to readset for select */
         infd = buf_stack->fd;
+        FD_ZERO(readfds);
         FD_SET(infd, readfds);
+
+        /* If web not ready listen */
+        if (listenfd != -1)
+            FD_SET(listenfd, readfds);
+
         if (infd == STDIN_FILENO && prompt_flag) {
             printf("%s", prompt);
             fflush(stdout);
@@ -573,6 +569,8 @@ int cmd_select(int nfds,
 
         if (infd >= nfds)
             nfds = infd + 1;
+        if (listenfd >= nfds)
+            nfds = listenfd + 1;
     }
     if (nfds == 0)
         return 0;
@@ -586,12 +584,23 @@ int cmd_select(int nfds,
         /* Commandline input available */
         FD_CLR(infd, readfds);
         result--;
-        if (has_infile) {
-            char *cmdline;
-            cmdline = readline();
-            if (cmdline)
-                interpret_cmd(cmdline);
-        }
+        char *cmdline;
+        cmdline = readline();
+        if (cmdline)
+            interpret_cmd(cmdline);
+    } else if (readfds && FD_ISSET(listenfd, readfds)) {
+        FD_CLR(listenfd, readfds);
+        result--;
+        int connfd;
+        struct sockaddr_in clientaddr;
+        socklen_t clientlen = sizeof(clientaddr);
+        connfd = accept(listenfd, (SA *) &clientaddr, &clientlen);
+
+        char *p = process(connfd, &clientaddr);
+        if (p)
+            interpret_cmd(p);
+        free(p);
+        close(connfd);
     }
     return result;
 }
@@ -646,7 +655,7 @@ void completion(const char *buf, linenoiseCompletions *lc)
     }
 }
 
-bool run_console(char *infile_name)
+bool run_console(char *infile_name, int *listenfd)
 {
     if (!push_file(infile_name)) {
         report(1, "ERROR: Could not open source file '%s'", infile_name);
@@ -655,11 +664,16 @@ bool run_console(char *infile_name)
 
     if (!has_infile) {
         char *cmdline;
-        while ((cmdline = linenoise(prompt)) != NULL) {
+        while (noise && (cmdline = linenoise(prompt)) != NULL) {
             interpret_cmd(cmdline);
             linenoiseHistoryAdd(cmdline);       /* Add to the history. */
             linenoiseHistorySave(HISTORY_FILE); /* Save the history on disk. */
             linenoiseFree(cmdline);
+        }
+        if (!noise) {
+            while (!cmd_done()) {
+                cmd_select(0, NULL, NULL, NULL, NULL);
+            }
         }
     } else {
         while (!cmd_done())

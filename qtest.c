@@ -34,6 +34,7 @@
 
 #include "console.h"
 #include "report.h"
+#include "web.h"
 
 /* Settable parameters */
 
@@ -64,6 +65,8 @@ static int string_length = MAXSTRING;
 #define MIN_RANDSTR_LEN 5
 #define MAX_RANDSTR_LEN 10
 static const char charset[] = "abcdefghijklmnopqrstuvwxyz";
+
+int listenfd;
 
 /* Forward declarations */
 static bool show_queue(int vlevel);
@@ -573,6 +576,7 @@ bool do_sort(int argc, char *argv[])
     return ok && !error_check();
 }
 
+
 static bool show_queue(int vlevel)
 {
     bool ok = true;
@@ -785,7 +789,7 @@ int main(int argc, char *argv[])
     add_quit_helper(queue_quit);
 
     bool ok = true;
-    ok = ok && run_console(infile_name);
+    ok = ok && run_console(infile_name, &listenfd);
     ok = ok && finish_cmd();
 
     return ok ? 0 : 1;
