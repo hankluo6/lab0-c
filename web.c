@@ -202,7 +202,7 @@ void handle_request(int out_fd, char *function_name)
     snprintf(buf, MAXLINE, "HTTP/1.1 200 OK\r\n%s%s%s%s",
              "Content-Type: text/html\r\n\r\n", "<html><head><style>",
              "body{font-family: monospace; font-size: 13px;}",
-             "</style></head><body>\n");
+             "</style><link rel=\"shortcut icon\" href=\"#\"></head><body>\n");
     writen(out_fd, buf, strlen(buf));
     snprintf(buf, MAXLINE, "</body></html>");
     writen(out_fd, buf, strlen(buf));
